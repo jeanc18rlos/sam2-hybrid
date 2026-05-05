@@ -62,6 +62,7 @@ export default function Segmenter() {
   const workerRef = useRef<Worker | null>(null);
   const maskOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const maskBinaryRef = useRef<HTMLCanvasElement | null>(null);
+  const maskBorderRef = useRef<HTMLCanvasElement | null>(null);
 
   const [source, setSource] = useState<Source>({ kind: "demo", demo: DEMOS[0] });
   const [status, setStatus] = useState("Loading…");
@@ -99,6 +100,7 @@ export default function Segmenter() {
       pts: Point[],
       maskOverlay: HTMLCanvasElement | null,
       maskBinary: HTMLCanvasElement | null,
+      maskBorder: HTMLCanvasElement | null,
       mode: ViewMode
     ) => {
       const canvas = canvasRef.current;
@@ -111,33 +113,40 @@ export default function Segmenter() {
       canvas.height = img.naturalHeight;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+      // Use the high-quality bilinear filter the browser ships — it's what
+      // gives the upsampled probability map its feathered edge.
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
       const hasMask = maskOverlay && maskBinary;
 
       if (!hasMask || mode === "edit") {
         ctx.drawImage(img, 0, 0);
         if (maskOverlay) {
-          ctx.save();
-          ctx.globalAlpha = 0.5;
+          // Soft red wash. Alpha is already encoded per-pixel by the
+          // sigmoid probability map in the source overlay canvas, so we
+          // draw it at globalAlpha=1 and let the data carry the gradient.
           ctx.drawImage(
             maskOverlay,
-            0,
-            0,
-            maskOverlay.width,
-            maskOverlay.height,
-            0,
-            0,
-            canvas.width,
-            canvas.height
+            0, 0, maskOverlay.width, maskOverlay.height,
+            0, 0, canvas.width, canvas.height
           );
-          ctx.restore();
+          if (maskBorder) {
+            // Crisp outline on top of the soft wash.
+            ctx.drawImage(
+              maskBorder,
+              0, 0, maskBorder.width, maskBorder.height,
+              0, 0, canvas.width, canvas.height
+            );
+          }
         }
         for (const pt of pts) {
           ctx.beginPath();
           ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2);
           ctx.fillStyle =
             pt.label === 1
-              ? "rgba(96, 165, 250, 0.95)"
-              : "rgba(244, 63, 94, 0.95)";
+              ? "rgba(96, 165, 250, 0.95)"  // include = sky blue
+              : "rgba(250, 204, 21, 0.95)"; // exclude = amber (red is reserved for the brand mask)
           ctx.fill();
           ctx.strokeStyle = "white";
           ctx.lineWidth = 3;
@@ -152,16 +161,17 @@ export default function Segmenter() {
         ctx.globalCompositeOperation = "destination-in";
         ctx.drawImage(
           maskBinary,
-          0,
-          0,
-          maskBinary.width,
-          maskBinary.height,
-          0,
-          0,
-          canvas.width,
-          canvas.height
+          0, 0, maskBinary.width, maskBinary.height,
+          0, 0, canvas.width, canvas.height
         );
         ctx.restore();
+        if (maskBorder) {
+          ctx.drawImage(
+            maskBorder,
+            0, 0, maskBorder.width, maskBorder.height,
+            0, 0, canvas.width, canvas.height
+          );
+        }
         return;
       }
 
@@ -171,16 +181,17 @@ export default function Segmenter() {
         ctx.globalCompositeOperation = "destination-out";
         ctx.drawImage(
           maskBinary,
-          0,
-          0,
-          maskBinary.width,
-          maskBinary.height,
-          0,
-          0,
-          canvas.width,
-          canvas.height
+          0, 0, maskBinary.width, maskBinary.height,
+          0, 0, canvas.width, canvas.height
         );
         ctx.restore();
+        if (maskBorder) {
+          ctx.drawImage(
+            maskBorder,
+            0, 0, maskBorder.width, maskBorder.height,
+            0, 0, canvas.width, canvas.height
+          );
+        }
         return;
       }
     },
@@ -207,35 +218,85 @@ export default function Segmenter() {
         const { mask, width, height, score: s } = data;
         const overlay = document.createElement("canvas");
         const binary = document.createElement("canvas");
-        overlay.width = binary.width = width;
-        overlay.height = binary.height = height;
+        const border = document.createElement("canvas");
+        overlay.width = binary.width = border.width = width;
+        overlay.height = binary.height = border.height = height;
         const octx = overlay.getContext("2d");
         const bctx = binary.getContext("2d");
-        if (octx && bctx) {
+        const rctx = border.getContext("2d");
+        if (octx && bctx && rctx) {
+          // Brand red — Jean Rojas accent. Tailwind red-500: #ef4444.
+          const R = 239;
+          const G = 68;
+          const B = 68;
+
           const overlayData = new ImageData(width, height);
-          const binaryData = new ImageData(width, height);
+          const binaryData  = new ImageData(width, height);
+          const inside      = new Uint8Array(width * height);
+
+          // Pass 1 — paint the soft red wash from the sigmoid probability,
+          // plus build a binary mask (for cutout/erase) and an "inside"
+          // map we'll dilate next to produce the border.
           for (let i = 0; i < mask.length; i++) {
+            const p = mask[i]; // sigmoid probability, 0..1
             const idx = i * 4;
-            if (mask[i] > 0) {
-              overlayData.data[idx] = 167;
-              overlayData.data[idx + 1] = 139;
-              overlayData.data[idx + 2] = 250;
-              overlayData.data[idx + 3] = 220;
-              binaryData.data[idx] = 255;
+            if (p > 0.05) {
+              overlayData.data[idx]     = R;
+              overlayData.data[idx + 1] = G;
+              overlayData.data[idx + 2] = B;
+              // Soft wash: peaks at ~190/255 inside the mask, falls off at edges.
+              overlayData.data[idx + 3] = Math.min(200, Math.round(p * 220));
+            }
+            if (p > 0.5) {
+              binaryData.data[idx]     = 255;
               binaryData.data[idx + 1] = 255;
               binaryData.data[idx + 2] = 255;
               binaryData.data[idx + 3] = 255;
+              inside[i] = 1;
             }
           }
           octx.putImageData(overlayData, 0, 0);
           bctx.putImageData(binaryData, 0, 0);
+
+          // Pass 2 — 4-connected dilate by 1, then subtract the original
+          // = a 1-pixel ring exactly on the boundary. Drawn full-strength
+          // in the brand red so the mask reads cleanly even at low alpha.
+          const borderData = new ImageData(width, height);
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const i = y * width + x;
+              if (inside[i]) continue;
+              // outside the mask — is any 4-neighbor inside? then we're a border pixel
+              const onEdge =
+                (x > 0          && inside[i - 1])         ||
+                (x < width - 1  && inside[i + 1])         ||
+                (y > 0          && inside[i - width])     ||
+                (y < height - 1 && inside[i + width]);
+              if (onEdge) {
+                const idx = i * 4;
+                borderData.data[idx]     = R;
+                borderData.data[idx + 1] = G;
+                borderData.data[idx + 2] = B;
+                borderData.data[idx + 3] = 255;
+              }
+            }
+          }
+          rctx.putImageData(borderData, 0, 0);
+
           maskOverlayRef.current = overlay;
           maskBinaryRef.current = binary;
+          maskBorderRef.current = border;
         }
         setScore(s);
         setProcessing(false);
         setPoints((p) => {
-          draw(p, maskOverlayRef.current, maskBinaryRef.current, viewRef.current);
+          draw(
+            p,
+            maskOverlayRef.current,
+            maskBinaryRef.current,
+            maskBorderRef.current,
+            viewRef.current
+          );
           return p;
         });
       } else if (type === "error") {
@@ -263,13 +324,14 @@ export default function Segmenter() {
     setScore(null);
     maskOverlayRef.current = null;
     maskBinaryRef.current = null;
+    maskBorderRef.current = null;
 
     const img = new window.Image();
     img.crossOrigin = "anonymous";
     img.src = sourceParams.imageUrl;
     img.onload = () => {
       imgRef.current = img;
-      draw([], null, null, "edit");
+      draw([], null, null, null, "edit");
       setStatus("Loading embeddings…");
       workerRef.current?.postMessage({
         type: "load-embeddings",
@@ -283,7 +345,13 @@ export default function Segmenter() {
   }, [sourceParams, draw]);
 
   useEffect(() => {
-    draw(points, maskOverlayRef.current, maskBinaryRef.current, view);
+    draw(
+      points,
+      maskOverlayRef.current,
+      maskBinaryRef.current,
+      maskBorderRef.current,
+      view
+    );
   }, [view, points, draw]);
 
   const addPoint = useCallback(
@@ -299,7 +367,13 @@ export default function Segmenter() {
       const y = Math.round((e.clientY - rect.top) * sy);
       const next = [...points, { x, y, label }];
       setPoints(next);
-      draw(next, maskOverlayRef.current, maskBinaryRef.current, "edit");
+      draw(
+        next,
+        maskOverlayRef.current,
+        maskBinaryRef.current,
+        maskBorderRef.current,
+        "edit"
+      );
       setProcessing(true);
       setStatus("Decoding…");
       workerRef.current?.postMessage({
@@ -319,8 +393,9 @@ export default function Segmenter() {
     setScore(null);
     maskOverlayRef.current = null;
     maskBinaryRef.current = null;
+    maskBorderRef.current = null;
     setView("edit");
-    draw([], null, null, "edit");
+    draw([], null, null, null, "edit");
     setStatus(embeddingsReady ? "Click anywhere on the image" : status);
   }, [draw, embeddingsReady, status]);
 
@@ -427,7 +502,7 @@ export default function Segmenter() {
               onClick={() => setSource({ kind: "demo", demo: d })}
               className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors ${
                 active
-                  ? "border-violet-500 bg-violet-500/15 text-violet-300"
+                  ? "border-red-500 bg-red-500/15 text-red-300"
                   : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
               }`}
             >
@@ -445,9 +520,9 @@ export default function Segmenter() {
           onDrop={onDrop}
           className={`cursor-pointer rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors ${
             dragOver
-              ? "border-violet-400 bg-violet-500/20 text-violet-200"
+              ? "border-red-400 bg-red-500/20 text-red-200"
               : source.kind === "byo"
-                ? "border-violet-500 bg-violet-500/15 text-violet-300"
+                ? "border-red-500 bg-red-500/15 text-red-300"
                 : "border-dashed border-stone-600 bg-stone-900/40 text-stone-300 hover:bg-stone-800"
           }`}
         >
@@ -534,7 +609,7 @@ export default function Segmenter() {
                   className={`inline-block h-1.5 w-1.5 rounded-full ${
                     ready
                       ? processing
-                        ? "animate-pulse bg-violet-400"
+                        ? "animate-pulse bg-red-400"
                         : "bg-emerald-400"
                       : "animate-pulse bg-stone-500"
                   }`}
@@ -544,7 +619,7 @@ export default function Segmenter() {
                 </span>
               </div>
               {score !== null && !processing && (
-                <div className="mt-1.5 tabular-nums text-violet-300">
+                <div className="mt-1.5 tabular-nums text-red-300">
                   confidence {(score * 100).toFixed(1)}%
                 </div>
               )}
@@ -578,7 +653,7 @@ export default function Segmenter() {
                 <div className="absolute inset-0 grid place-items-center bg-stone-950/60 backdrop-blur-sm">
                   <div className="flex flex-col items-center gap-2 text-sm text-stone-400">
                     <svg
-                      className="h-5 w-5 animate-spin text-violet-400"
+                      className="h-5 w-5 animate-spin text-red-400"
                       viewBox="0 0 24 24"
                       fill="none"
                     >

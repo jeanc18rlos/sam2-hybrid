@@ -11,9 +11,10 @@ html, body {
 }
 
 body {
+  /* Brand red ambient. red-500 (#ef4444) at low alpha in two pools. */
   background:
-    radial-gradient(1200px 600px at 80% -10%, rgba(167,139,250,0.10), transparent 60%),
-    radial-gradient(1000px 600px at -10% 90%, rgba(244,114,182,0.06), transparent 60%),
+    radial-gradient(1200px 600px at 80% -10%, rgba(239,68,68,0.12), transparent 60%),
+    radial-gradient(1000px 600px at -10% 90%, rgba(220,38,38,0.07), transparent 60%),
     #0a0a0a;
   color: #e7e5e4;
   font-feature-settings: "ss01", "cv11";

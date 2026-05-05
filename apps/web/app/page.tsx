@@ -5,8 +5,8 @@ export default function Home() {
   return (
     <main className="mx-auto max-w-5xl px-6 pb-24 pt-12 lg:px-8 lg:pt-20">
       <header className="mb-12">
-        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-400" />
+        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-red-300">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
           sam2-hybrid · v0.1
         </div>
         <h1 className="mt-3 text-balance text-4xl font-bold leading-[1.05] tracking-tight text-white sm:text-5xl">
@@ -25,7 +25,7 @@ export default function Home() {
             href="https://jeanrojas.com/blog/splitting-sam2-encoder-decoder"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-violet-400"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-500 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-400"
           >
             Read the full write-up
             <Arrow />
@@ -113,7 +113,7 @@ export default function Home() {
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-stone-800 bg-stone-900/40 p-5">
-      <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300">
+      <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-red-300">
         {title}
       </h3>
       <p className="text-stone-300">{children}</p>

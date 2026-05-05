@@ -124,20 +124,49 @@ self.onmessage = async (e) => {
       const maskH = dims[2];
       const maskW = dims[3];
       const maskSize = maskH * maskW;
+      const iouScores = iouOutput ? (iouOutput.cpuData || iouOutput.data) : null;
 
+      // Mask candidate selection.
+      //
+      // SAM2 returns three candidates with multimask_output=True. With a
+      // single point prompt the model is uncertain about which scale was
+      // intended (part vs sub-object vs whole), and the IoU scores are
+      // close. Picking by IoU often returns the smaller "part" mask.
+      //
+      // To match the user expectation that one click selects the WHOLE
+      // object, we pick the candidate with the largest area on the very
+      // first click. Once the user has placed two or more points, the
+      // decoder is far more confident in a specific scale, so we trust
+      // the IoU score.
       let bestIdx = 0;
-      if (iouOutput) {
-        const scores = iouOutput.cpuData || iouOutput.data;
+      if (N <= 1) {
+        let bestArea = -1;
+        for (let m = 0; m < numMasks; m++) {
+          let area = 0;
+          const start = m * maskSize;
+          for (let i = 0; i < maskSize; i++) {
+            if (maskData[start + i] > 0) area++;
+          }
+          if (area > bestArea) { bestArea = area; bestIdx = m; }
+        }
+      } else if (iouScores) {
         let bestScore = -Infinity;
         for (let i = 0; i < numMasks; i++) {
-          if (scores[i] > bestScore) { bestScore = scores[i]; bestIdx = i; }
+          if (iouScores[i] > bestScore) { bestScore = iouScores[i]; bestIdx = i; }
         }
       }
 
+      // Send back soft probabilities (sigmoid of the logits) instead of
+      // a hard 0/1 mask. The renderer uses these for feathering — the
+      // bilinear-upsampled probability map gives smooth alpha gradients
+      // at the mask edge, which the previous binary mask could not.
       const bestMask = new Float32Array(maskSize);
       const offset = bestIdx * maskSize;
       for (let i = 0; i < maskSize; i++) {
-        bestMask[i] = maskData[offset + i] > 0 ? 1.0 : 0.0;
+        const x = maskData[offset + i];
+        bestMask[i] = x >= 0
+          ? 1 / (1 + Math.exp(-x))
+          : Math.exp(x) / (1 + Math.exp(x));
       }
 
       self.postMessage({
@@ -146,7 +175,7 @@ self.onmessage = async (e) => {
           mask: Array.from(bestMask),
           width: maskW,
           height: maskH,
-          score: iouOutput ? (iouOutput.cpuData || iouOutput.data)[bestIdx] : 0,
+          score: iouScores ? iouScores[bestIdx] : 0,
         },
       });
     } catch (err) {
