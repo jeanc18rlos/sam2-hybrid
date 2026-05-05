@@ -133,10 +133,29 @@ def main() -> None:
     ckpt = ensure_checkpoint(cache / "checkpoints")
     encoder_onnx = ensure_encoder_onnx(ckpt, cache / "onnx")
 
-    # CoreML on this exported graph produces NaN — partitions the graph into
-    # ~280 fragments and the float16 reductions across the EP boundary blow
-    # up. CPU is slower (~30s for the large encoder) but correct.
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    # GPU path. Tries in order:
+    #   1. CUDA (Linux + NVIDIA, used on Replicate / Colab)
+    #   2. CoreML in MLProgram mode w/ ALL compute units (Apple Silicon)
+    #   3. CPU fallback
+    #
+    # The plain CoreML EP (default NeuralNetwork format) silently produces
+    # NaN on this exported graph because of fp16 reductions across the
+    # ~280 partition boundaries. MLProgram mode keeps the graph monolithic
+    # and runs cleanly on Apple GPU + Neural Engine.
+    available = ort.get_available_providers()
+    providers: list = []
+    if "CUDAExecutionProvider" in available:
+        providers.append("CUDAExecutionProvider")
+    if "CoreMLExecutionProvider" in available:
+        providers.append((
+            "CoreMLExecutionProvider",
+            {
+                "ModelFormat": "MLProgram",
+                "MLComputeUnits": "ALL",
+                "RequireStaticInputShapes": "1",
+            },
+        ))
+    providers.append("CPUExecutionProvider")
     print(f"loading encoder onnx via providers={providers}")
     sess = ort.InferenceSession(str(encoder_onnx), providers=providers)
 
