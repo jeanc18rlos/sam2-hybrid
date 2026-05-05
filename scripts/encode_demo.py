@@ -133,8 +133,12 @@ def main() -> None:
     ckpt = ensure_checkpoint(cache / "checkpoints")
     encoder_onnx = ensure_encoder_onnx(ckpt, cache / "onnx")
 
-    print(f"loading encoder onnx via providers={ort.get_available_providers()}")
-    sess = ort.InferenceSession(str(encoder_onnx), providers=ort.get_available_providers())
+    # CoreML on this exported graph produces NaN — partitions the graph into
+    # ~280 fragments and the float16 reductions across the EP boundary blow
+    # up. CPU is slower (~30s for the large encoder) but correct.
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    print(f"loading encoder onnx via providers={providers}")
+    sess = ort.InferenceSession(str(encoder_onnx), providers=providers)
 
     arr, original_size, full_img = preprocess(img_path)
 
