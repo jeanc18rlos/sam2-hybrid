@@ -1,0 +1,22 @@
+{
+  "name": "portrait",
+  "description": "Person portrait - click to select face/body",
+  "image": "image.jpg",
+  "embeddings": "embeddings.bin",
+  "embeddingsSize": 16777469,
+  "imageWidth": 800,
+  "imageHeight": 1200,
+  "points": [
+    {
+      "x": 400,
+      "y": 300,
+      "label": 1
+    },
+    {
+      "x": 50,
+      "y": 50,
+      "label": 0
+    }
+  ],
+  "decoderModel": "/models/sam2_decoder.onnx"
+}

@@ -17,14 +17,18 @@ out/
 .env.*.local
 !.env.example
 
-# Model weights — tracked separately, never in git.
+# Encoder weights stay out of git (~850 MB).
 weights/
-*.onnx
 *.onnx.data
 *.pt
 *.safetensors
 output_models/
 original_models/
+
+# Allow the small decoder model + a pre-baked demo bundle to ship with
+# the Vercel template (so the deploy button produces a working app).
+*.onnx
+!apps/web/public/models/*.onnx
 
 # Build artifacts
 *.zip
