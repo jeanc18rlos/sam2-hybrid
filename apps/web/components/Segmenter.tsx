@@ -215,7 +215,10 @@ export default function Segmenter() {
         setEmbeddingsReady(true);
         setStatus("Click anywhere on the image");
       } else if (type === "mask-result") {
-        const { mask, width, height, score: s } = data;
+        // Worker now sends a transferable ArrayBuffer (zero-copy) of the
+        // 1024x1024 sigmoid probability map. Reconstruct the typed view.
+        const { mask: maskBuffer, width, height, score: s } = data;
+        const mask = new Float32Array(maskBuffer as ArrayBuffer);
         const overlay = document.createElement("canvas");
         const binary = document.createElement("canvas");
         const border = document.createElement("canvas");
@@ -230,90 +233,99 @@ export default function Segmenter() {
           const G = 68;
           const B = 68;
 
-          // Subtle wash: peaks at ~110/255 inside the mask. The image
-          // underneath stays clearly readable; the user's eye reads the
-          // border outline as the primary mask boundary.
+          // Subtle wash: peaks at ~110/255 inside the mask.
           const ALPHA_PEAK = 110;
-          // Smooth threshold for the binary mask — center 0.5, ramp width
-          // 0.18 in probability space. Apply smoothstep so the boundary
-          // alpha-ramps cleanly instead of showing the source-grid steps.
+          // Smoothstep ramp for the wash alpha.
           const T_LO = 0.42;
           const T_HI = 0.58;
-          // Border thickness in source-grid pixels. On a 1500-display the
-          // 256-grid pixel ≈ 6 display pixels, so 3 source-pixel dilation
-          // gives a visible ~12-18 display-pixel ring.
-          const BORDER_RADIUS = 3;
+          // Border thickness in 1024-grid pixels. The 1024-grid pixel
+          // is ~1.5 display pixels at typical canvas size, so 7 source
+          // pixels = a soft ~10-pixel ring on display.
+          const BORDER_RADIUS = 7;
 
           const overlayData = new ImageData(width, height);
           const binaryData  = new ImageData(width, height);
           const inside      = new Uint8Array(width * height);
 
-          // Pass 1: paint the soft wash from the (already-blurred) probs,
-          // build the binary mask via smoothstep, mark inside cells.
-          for (let i = 0; i < mask.length; i++) {
-            const p = mask[i];
-            const idx = i * 4;
+          // Pass 1: paint the wash, build the binary mask, mark inside
+          // cells, and compute the mask bounding box so the border
+          // distance transform doesn't iterate the whole 1024² grid.
+          let minX = width, minY = height, maxX = -1, maxY = -1;
+          for (let y = 0; y < height; y++) {
+            const row = y * width;
+            for (let x = 0; x < width; x++) {
+              const i = row + x;
+              const p = mask[i];
+              const idx = i * 4;
 
-            // Smoothstep: 0 below T_LO, 1 above T_HI, smooth cubic between.
-            let s = 0;
-            if (p >= T_HI) s = 1;
-            else if (p > T_LO) {
-              const t = (p - T_LO) / (T_HI - T_LO);
-              s = t * t * (3 - 2 * t);
-            }
+              let s = 0;
+              if (p >= T_HI) s = 1;
+              else if (p > T_LO) {
+                const t = (p - T_LO) / (T_HI - T_LO);
+                s = t * t * (3 - 2 * t);
+              }
+              if (s > 0) {
+                overlayData.data[idx]     = R;
+                overlayData.data[idx + 1] = G;
+                overlayData.data[idx + 2] = B;
+                overlayData.data[idx + 3] = Math.round(s * ALPHA_PEAK);
+              }
 
-            if (s > 0) {
-              overlayData.data[idx]     = R;
-              overlayData.data[idx + 1] = G;
-              overlayData.data[idx + 2] = B;
-              overlayData.data[idx + 3] = Math.round(s * ALPHA_PEAK);
-            }
-
-            if (p > 0.5) {
-              binaryData.data[idx]     = 255;
-              binaryData.data[idx + 1] = 255;
-              binaryData.data[idx + 2] = 255;
-              binaryData.data[idx + 3] = 255;
-              inside[i] = 1;
+              if (p > 0.5) {
+                binaryData.data[idx]     = 255;
+                binaryData.data[idx + 1] = 255;
+                binaryData.data[idx + 2] = 255;
+                binaryData.data[idx + 3] = 255;
+                inside[i] = 1;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
             }
           }
           octx.putImageData(overlayData, 0, 0);
           bctx.putImageData(binaryData, 0, 0);
 
-          // Pass 2: dilated-minus-original border. Distance-transform up to
-          // BORDER_RADIUS source-grid pixels off the edge; alpha falls
-          // linearly with distance so the line itself reads soft, not
-          // pixelated, after upsample.
+          // Pass 2: soft border via Chebyshev distance transform, but only
+          // inside (mask bbox + BORDER_RADIUS). Cuts the work from 1M
+          // pixels per frame to roughly the perimeter band of the mask.
           const borderData = new ImageData(width, height);
-          for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-              const i = y * width + x;
-              if (inside[i]) continue;
+          if (maxX >= 0) {
+            const x0 = Math.max(0, minX - BORDER_RADIUS);
+            const y0 = Math.max(0, minY - BORDER_RADIUS);
+            const x1 = Math.min(width  - 1, maxX + BORDER_RADIUS);
+            const y1 = Math.min(height - 1, maxY + BORDER_RADIUS);
+            for (let y = y0; y <= y1; y++) {
+              const row = y * width;
+              for (let x = x0; x <= x1; x++) {
+                const i = row + x;
+                if (inside[i]) continue;
 
-              // Find the nearest "inside" cell within BORDER_RADIUS.
-              let best = -1;
-              for (let dy = -BORDER_RADIUS; dy <= BORDER_RADIUS && best < 0; dy++) {
-                const ny = y + dy;
-                if (ny < 0 || ny >= height) continue;
-                const row = ny * width;
-                const adx = BORDER_RADIUS - Math.abs(dy);
-                for (let dx = -adx; dx <= adx; dx++) {
-                  const nx = x + dx;
-                  if (nx < 0 || nx >= width) continue;
-                  if (inside[row + nx]) {
-                    const d = Math.max(Math.abs(dx), Math.abs(dy));
-                    if (best < 0 || d < best) best = d;
+                let best = -1;
+                for (let dy = -BORDER_RADIUS; dy <= BORDER_RADIUS; dy++) {
+                  const ny = y + dy;
+                  if (ny < 0 || ny >= height) continue;
+                  const r = ny * width;
+                  const adx = BORDER_RADIUS - Math.abs(dy);
+                  for (let dx = -adx; dx <= adx; dx++) {
+                    const nx = x + dx;
+                    if (nx < 0 || nx >= width) continue;
+                    if (inside[r + nx]) {
+                      const d = Math.max(Math.abs(dx), Math.abs(dy));
+                      if (best < 0 || d < best) best = d;
+                    }
                   }
+                  if (best === 1) break; // can't get closer than 1
                 }
-              }
-              if (best >= 0) {
-                const idx = i * 4;
-                // Soft falloff: ring is solid in the inner half, fades out
-                const t = 1 - (best / (BORDER_RADIUS + 1));
-                borderData.data[idx]     = R;
-                borderData.data[idx + 1] = G;
-                borderData.data[idx + 2] = B;
-                borderData.data[idx + 3] = Math.round(255 * t);
+                if (best >= 0) {
+                  const idx = i * 4;
+                  const t = 1 - (best / (BORDER_RADIUS + 1));
+                  borderData.data[idx]     = R;
+                  borderData.data[idx + 1] = G;
+                  borderData.data[idx + 2] = B;
+                  borderData.data[idx + 3] = Math.round(255 * t);
+                }
               }
             }
           }

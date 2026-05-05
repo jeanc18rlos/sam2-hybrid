@@ -157,22 +157,33 @@ self.onmessage = async (e) => {
       }
 
       // Smooth the 256x256 probability map with a separable 5-tap
-      // Gaussian. On a 1500+ display canvas one source pixel covers
-      // ~6 display pixels, and SAM2's logits are extremely confident
-      // (basically binary at the boundary), so without smoothing the
-      // upsample is heavily stair-stepped. The blur trades a small
-      // amount of edge precision for a clean continuous boundary.
+      // Gaussian. SAM2's logits are extremely confident (essentially
+      // binary at the boundary), so without smoothing the upsample is
+      // stair-stepped. Tiny edge-precision loss for a clean boundary.
       const blurred = gaussianBlur5(probs, maskW, maskH);
 
-      self.postMessage({
-        type: "mask-result",
-        data: {
-          mask: Array.from(blurred),
-          width: maskW,
-          height: maskH,
-          score: iouScores ? iouScores[bestIdx] : 0,
+      // Upsample the 256x256 map to 1024x1024 with bilinear filtering
+      // INSIDE the worker. This is the "we always work on a 1024 grid"
+      // promise — the renderer thresholds, dilates the border, and
+      // builds the wash on the high-res grid, so a final drawImage to
+      // a ~1500-display canvas is only ~1.5x and smooths beautifully.
+      // The decoder's 256x256 export stays unchanged on disk.
+      const HI = 1024;
+      const upsampled = upsampleBilinear(blurred, maskW, maskH, HI, HI);
+
+      // Transfer the buffer (zero-copy) — 4 MB is too big to clone.
+      self.postMessage(
+        {
+          type: "mask-result",
+          data: {
+            mask: upsampled.buffer,
+            width: HI,
+            height: HI,
+            score: iouScores ? iouScores[bestIdx] : 0,
+          },
         },
-      });
+        [upsampled.buffer]
+      );
     } catch (err) {
       self.postMessage({ type: "error", data: "Decode failed: " + err.message });
     }
@@ -237,6 +248,36 @@ async function loadMsgpackFormat(url, imageWidth, imageHeight) {
     tensors,
     originalSize: decoded.original_size || [imageHeight, imageWidth],
   };
+}
+
+// Bilinear upsample of a Float32 grid. ~1M output pixels in ~10 ms.
+function upsampleBilinear(src, sw, sh, dw, dh) {
+  const out = new Float32Array(dw * dh);
+  const sx = (sw - 1) / (dw - 1);
+  const sy = (sh - 1) / (dh - 1);
+  for (let y = 0; y < dh; y++) {
+    const fy = y * sy;
+    const y0 = Math.floor(fy);
+    const y1 = y0 + 1 < sh ? y0 + 1 : sh - 1;
+    const wy = fy - y0;
+    const r0 = y0 * sw;
+    const r1 = y1 * sw;
+    const dy = y * dw;
+    for (let x = 0; x < dw; x++) {
+      const fx = x * sx;
+      const x0 = Math.floor(fx);
+      const x1 = x0 + 1 < sw ? x0 + 1 : sw - 1;
+      const wx = fx - x0;
+      const v00 = src[r0 + x0];
+      const v01 = src[r0 + x1];
+      const v10 = src[r1 + x0];
+      const v11 = src[r1 + x1];
+      const v0 = v00 + wx * (v01 - v00);
+      const v1 = v10 + wx * (v11 - v10);
+      out[dy + x] = v0 + wy * (v1 - v0);
+    }
+  }
+  return out;
 }
 
 // Separable 5-tap Gaussian blur ([1,4,6,4,1] / 16). Edges clamp.
