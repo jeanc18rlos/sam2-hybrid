@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+.next/
+out/
+.vercel/
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Model weights — tracked separately, never in git.
+weights/
+*.onnx
+*.onnx.data
+*.pt
+*.safetensors
+output_models/
+original_models/
+
+# Build artifacts
+*.zip
+embedding.bin
+manifest.json
+preview.jpg
+
+# OS
+.DS_Store
+.idea/
+.vscode/
