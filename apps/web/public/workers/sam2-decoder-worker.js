@@ -163,7 +163,16 @@ self.onmessage = async (e) => {
       for (let i = 0; i < maskSize; i++) {
         logitsBest[i] = maskData[offset + i];
       }
-      const logitsHi = upsampleBilinear(logitsBest, maskW, maskH, HI, HI);
+
+      // Smooth the LOGITS at source resolution. SAM2 occasionally emits
+      // adjacent source pixels with opposite-sign logits in textured
+      // regions (knit fabrics, foliage, etc.); without this they upsample
+      // into a visible "checker" of binary holes. The blur averages
+      // neighbouring logits so the boundary becomes a single smooth
+      // signed gradient rather than a high-frequency stripe.
+      const logitsLo = gaussianBlur5(logitsBest, maskW, maskH);
+
+      const logitsHi = upsampleBilinear(logitsLo, maskW, maskH, HI, HI);
 
       const probsHi = new Float32Array(HI * HI);
       for (let i = 0; i < probsHi.length; i++) {

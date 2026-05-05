@@ -243,14 +243,54 @@ export default function Segmenter() {
           // pixels = a soft ~10-pixel ring on display.
           const BORDER_RADIUS = 7;
 
+          // Closing radius in 1024-grid units. Fills holes up to ~16px
+          // diameter in source-grid (≈ 24px on display).
+          const CLOSE = 8;
+
+          // Pass 1a — build the raw binary mask + bbox.
+          const rawInside = new Uint8Array(width * height);
+          let minX = width, minY = height, maxX = -1, maxY = -1;
+          for (let y = 0; y < height; y++) {
+            const row = y * width;
+            for (let x = 0; x < width; x++) {
+              if (mask[row + x] > 0.5) {
+                rawInside[row + x] = 1;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+
+          // Pass 1b — morphological closing (dilate then erode) on the
+          // binary mask. Two separable passes per op via 1D rolling
+          // counters, restricted to bbox + CLOSE margin so the work
+          // stays well below click latency. Fills the noisy holes
+          // SAM2's logits leave in textured regions.
+          const inside = maxX < 0
+            ? rawInside
+            : morphClose(
+                rawInside, width, height, CLOSE,
+                Math.max(0, minX - CLOSE),
+                Math.max(0, minY - CLOSE),
+                Math.min(width  - 1, maxX + CLOSE),
+                Math.min(height - 1, maxY + CLOSE),
+              );
+
+          // After closing the bbox can grow; re-derive it for the border pass.
+          if (maxX >= 0) {
+            minX = Math.max(0, minX - CLOSE);
+            minY = Math.max(0, minY - CLOSE);
+            maxX = Math.min(width  - 1, maxX + CLOSE);
+            maxY = Math.min(height - 1, maxY + CLOSE);
+          }
+
+          // Pass 1c — paint wash + binary canvas from the closed mask
+          // (wash uses smoothstep on the soft probs, binary uses the
+          // closed inside-map so it has no holes).
           const overlayData = new ImageData(width, height);
           const binaryData  = new ImageData(width, height);
-          const inside      = new Uint8Array(width * height);
-
-          // Pass 1: paint the wash, build the binary mask, mark inside
-          // cells, and compute the mask bounding box so the border
-          // distance transform doesn't iterate the whole 1024² grid.
-          let minX = width, minY = height, maxX = -1, maxY = -1;
           for (let y = 0; y < height; y++) {
             const row = y * width;
             for (let x = 0; x < width; x++) {
@@ -264,6 +304,11 @@ export default function Segmenter() {
                 const t = (p - T_LO) / (T_HI - T_LO);
                 s = t * t * (3 - 2 * t);
               }
+              // The closed mask may have grown slightly; ensure those
+              // newly-included pixels still get a wash even though their
+              // raw probability was just below T_LO.
+              if (inside[i] && s < 1) s = Math.max(s, 0.85);
+
               if (s > 0) {
                 overlayData.data[idx]     = R;
                 overlayData.data[idx + 1] = G;
@@ -271,16 +316,11 @@ export default function Segmenter() {
                 overlayData.data[idx + 3] = Math.round(s * ALPHA_PEAK);
               }
 
-              if (p > 0.5) {
+              if (inside[i]) {
                 binaryData.data[idx]     = 255;
                 binaryData.data[idx + 1] = 255;
                 binaryData.data[idx + 2] = 255;
                 binaryData.data[idx + 3] = 255;
-                inside[i] = 1;
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
               }
             }
           }
@@ -743,4 +783,79 @@ export default function Segmenter() {
       </div>
     </div>
   );
+}
+
+/**
+ * Binary morphological closing: dilate by `r` then erode by `r`. Fills
+ * holes and gaps up to ~2r in diameter while preserving the outer
+ * boundary. Implemented with separable 1D passes restricted to the
+ * supplied bounding box for click-latency speed.
+ */
+function morphClose(
+  src: Uint8Array,
+  w: number,
+  h: number,
+  r: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): Uint8Array {
+  const dilatedH = new Uint8Array(w * h);
+  const dilated  = new Uint8Array(w * h);
+  const erodedH  = new Uint8Array(w * h);
+  const out      = new Uint8Array(w * h);
+
+  // --- DILATE: any-on in the row window, then any-on in the col window.
+  for (let y = y0; y <= y1; y++) {
+    const row = y * w;
+    for (let x = x0; x <= x1; x++) {
+      const xs = x - r > x0 ? x - r : x0;
+      const xe = x + r < x1 ? x + r : x1;
+      let on = 0;
+      for (let xi = xs; xi <= xe; xi++) {
+        if (src[row + xi]) { on = 1; break; }
+      }
+      dilatedH[row + x] = on;
+    }
+  }
+  for (let y = y0; y <= y1; y++) {
+    const row = y * w;
+    const ys = y - r > y0 ? y - r : y0;
+    const ye = y + r < y1 ? y + r : y1;
+    for (let x = x0; x <= x1; x++) {
+      let on = 0;
+      for (let yi = ys; yi <= ye; yi++) {
+        if (dilatedH[yi * w + x]) { on = 1; break; }
+      }
+      dilated[row + x] = on;
+    }
+  }
+
+  // --- ERODE: all-on in the row window, then all-on in the col window.
+  for (let y = y0; y <= y1; y++) {
+    const row = y * w;
+    for (let x = x0; x <= x1; x++) {
+      const xs = x - r > x0 ? x - r : x0;
+      const xe = x + r < x1 ? x + r : x1;
+      let on = 1;
+      for (let xi = xs; xi <= xe; xi++) {
+        if (!dilated[row + xi]) { on = 0; break; }
+      }
+      erodedH[row + x] = on;
+    }
+  }
+  for (let y = y0; y <= y1; y++) {
+    const row = y * w;
+    const ys = y - r > y0 ? y - r : y0;
+    const ye = y + r < y1 ? y + r : y1;
+    for (let x = x0; x <= x1; x++) {
+      let on = 1;
+      for (let yi = ys; yi <= ye; yi++) {
+        if (!erodedH[yi * w + x]) { on = 0; break; }
+      }
+      out[row + x] = on;
+    }
+  }
+  return out;
 }
