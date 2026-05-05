@@ -16,6 +16,7 @@ type Demo = {
   id: string;
   label: string;
   imageUrl: string;
+  /** msgpack .bin URL OR manifest.json URL — worker auto-detects. */
   embeddingsUrl: string;
   imageWidth: number;
   imageHeight: number;
@@ -29,6 +30,17 @@ const DEMOS: Demo[] = [
     embeddingsUrl: "/demos/portrait/embeddings.bin",
     imageWidth: 800,
     imageHeight: 1200,
+  },
+  {
+    id: "jean",
+    label: "Jean",
+    imageUrl: "/demos/jean/preview.jpg",
+    embeddingsUrl: "/demos/jean/manifest.json",
+    // EXIF-corrected portrait orientation. Worker uses the manifest's
+    // originalWidth/originalHeight to scale click coords, so these only
+    // need to match the preview.jpg aspect for the canvas sizing.
+    imageWidth: 1500,
+    imageHeight: 2000,
   },
 ];
 

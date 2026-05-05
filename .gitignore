@@ -1,5 +1,9 @@
 # Python
 __pycache__/
+
+# Local script cache for the encoder pipeline (~900 MB checkpoint +
+# 850 MB exported encoder ONNX). Never commit.
+.cache/
 *.py[cod]
 .venv/
 venv/
@@ -30,11 +34,17 @@ original_models/
 *.onnx
 !apps/web/public/models/*.onnx
 
-# Build artifacts
+# Notebook output at the repo root (one-off bundles users produce while
+# running the encoder). These should NOT be committed.
 *.zip
-embedding.bin
-manifest.json
-preview.jpg
+/embedding.bin
+/manifest.json
+/preview.jpg
+
+# But the pre-baked demo bundles under the web app ARE part of the
+# template — keep them tracked so "Deploy to Vercel" produces a
+# working app on first paint.
+!apps/web/public/demos/**
 
 # OS
 .DS_Store

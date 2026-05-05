@@ -1,0 +1,38 @@
+{
+  "preview": "preview.jpg",
+  "originalWidth": 2316,
+  "originalHeight": 3088,
+  "tensors": {
+    "image_embed": {
+      "offset": 0,
+      "shape": [
+        1,
+        256,
+        64,
+        64
+      ],
+      "dtype": "float16"
+    },
+    "high_res_feats_0": {
+      "offset": 2097152,
+      "shape": [
+        1,
+        32,
+        256,
+        256
+      ],
+      "dtype": "float16"
+    },
+    "high_res_feats_1": {
+      "offset": 6291456,
+      "shape": [
+        1,
+        64,
+        128,
+        128
+      ],
+      "dtype": "float16"
+    }
+  },
+  "totalBytes": 8388608
+}
