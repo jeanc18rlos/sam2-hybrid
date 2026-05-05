@@ -144,53 +144,44 @@ self.onmessage = async (e) => {
         if (area > bestArea) { bestArea = area; bestIdx = m; }
       }
 
-      // Quality pipeline. The exporter clamps logits to [-32, 32]; after
-      // sigmoid that's essentially a binary 0/1 mask with a 1-2 pixel
-      // boundary band. To get a clean upsampled boundary we have to do
-      // the heavy lifting in LOGIT space before sigmoid kills the gradient.
+      // Quality pipeline.
       //
-      //   1. Extract the chosen candidate's raw 256x256 logits.
-      //   2. Bilinear upsample LOGITS to 1024x1024. The boundary band
-      //      grows from ~1-2 source pixels to ~4-8 hi-res pixels and
-      //      stays a smooth signed-value gradient.
-      //   3. Sigmoid the hi-res logits. The wide boundary band yields
-      //      a wide soft-alpha ramp.
-      //   4. Light 5-tap Gaussian on the hi-res probability map to
-      //      polish any remaining sub-pixel jitter.
-      const HI = 1024;
+      // The decoder now emits 512x512 logits (re-exported with an
+      // in-graph bilinear upsample on top of the stock 256x256). Half
+      // the upscale factor at display time and the source-grid
+      // checker artifacts in textured regions go away.
+      //
+      //   1. Extract the chosen candidate's 512x512 logits.
+      //   2. Two passes of 5-tap Gaussian on the LOGITS — averages
+      //      neighbouring source samples so single-pixel sign flips
+      //      (sweater knit, foliage) don't survive into the binary mask.
+      //   3. Sigmoid → smooth 512x512 probability map with a wide
+      //      soft-alpha boundary.
+      //   4. Light final blur in probability space to polish jitter.
       const logitsBest = new Float32Array(maskSize);
       const offset = bestIdx * maskSize;
       for (let i = 0; i < maskSize; i++) {
         logitsBest[i] = maskData[offset + i];
       }
+      const logitsBlurredOnce  = gaussianBlur5(logitsBest, maskW, maskH);
+      const logitsBlurredTwice = gaussianBlur5(logitsBlurredOnce, maskW, maskH);
 
-      // Smooth the LOGITS at source resolution. SAM2 occasionally emits
-      // adjacent source pixels with opposite-sign logits in textured
-      // regions (knit fabrics, foliage, etc.); without this they upsample
-      // into a visible "checker" of binary holes. The blur averages
-      // neighbouring logits so the boundary becomes a single smooth
-      // signed gradient rather than a high-frequency stripe.
-      const logitsLo = gaussianBlur5(logitsBest, maskW, maskH);
-
-      const logitsHi = upsampleBilinear(logitsLo, maskW, maskH, HI, HI);
-
-      const probsHi = new Float32Array(HI * HI);
-      for (let i = 0; i < probsHi.length; i++) {
-        const x = logitsHi[i];
-        probsHi[i] = x >= 0
+      const probs = new Float32Array(maskSize);
+      for (let i = 0; i < probs.length; i++) {
+        const x = logitsBlurredTwice[i];
+        probs[i] = x >= 0
           ? 1 / (1 + Math.exp(-x))
           : Math.exp(x) / (1 + Math.exp(x));
       }
-      const finalProbs = gaussianBlur5(probsHi, HI, HI);
+      const finalProbs = gaussianBlur5(probs, maskW, maskH);
 
-      // Transfer the buffer zero-copy — 4 MB is too big to structured-clone.
       self.postMessage(
         {
           type: "mask-result",
           data: {
             mask: finalProbs.buffer,
-            width: HI,
-            height: HI,
+            width: maskW,
+            height: maskH,
             score: iouScores ? iouScores[bestIdx] : 0,
           },
         },

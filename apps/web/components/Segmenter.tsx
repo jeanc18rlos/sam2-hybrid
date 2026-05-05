@@ -228,24 +228,28 @@ export default function Segmenter() {
         const bctx = binary.getContext("2d");
         const rctx = border.getContext("2d");
         if (octx && bctx && rctx) {
-          // Brand red — Jean Rojas accent. Tailwind red-500: #ef4444.
-          const R = 239;
-          const G = 68;
-          const B = 68;
+          // SAM-style sky blue. Closer to the Meta demo than red.
+          // Tailwind sky-500: #0ea5e9 (RGB 14, 165, 233).
+          const R = 14;
+          const G = 165;
+          const B = 233;
 
           // Subtle wash: peaks at ~110/255 inside the mask.
           const ALPHA_PEAK = 110;
           // Smoothstep ramp for the wash alpha.
           const T_LO = 0.42;
           const T_HI = 0.58;
-          // Border thickness in 1024-grid pixels. The 1024-grid pixel
-          // is ~1.5 display pixels at typical canvas size, so 7 source
-          // pixels = a soft ~10-pixel ring on display.
-          const BORDER_RADIUS = 7;
+          // Border thickness in 512-grid pixels. The 512-grid pixel is
+          // ~3 display pixels at typical canvas size, so 4 source
+          // pixels = a soft ~10-12 display-pixel ring.
+          const BORDER_RADIUS = 4;
 
-          // Closing radius in 1024-grid units. Fills holes up to ~16px
-          // diameter in source-grid (≈ 24px on display).
-          const CLOSE = 8;
+          // Closing radius in 512-grid units. Kept small so the square
+          // structuring element doesn't leave visible square corners on
+          // filled regions. The double logit-space blur in the worker
+          // pre-fills most holes anyway; this only mops up specks 1-3
+          // source-pixels wide.
+          const CLOSE = 2;
 
           // Pass 1a — build the raw binary mask + bbox.
           const rawInside = new Uint8Array(width * height);
