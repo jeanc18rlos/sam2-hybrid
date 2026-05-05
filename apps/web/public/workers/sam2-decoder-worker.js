@@ -126,53 +126,48 @@ self.onmessage = async (e) => {
       const maskSize = maskH * maskW;
       const iouScores = iouOutput ? (iouOutput.cpuData || iouOutput.data) : null;
 
-      // Mask candidate selection.
+      // Always pick the candidate with the largest area.
       //
-      // SAM2 returns three candidates with multimask_output=True. With a
-      // single point prompt the model is uncertain about which scale was
-      // intended (part vs sub-object vs whole), and the IoU scores are
-      // close. Picking by IoU often returns the smaller "part" mask.
-      //
-      // To match the user expectation that one click selects the WHOLE
-      // object, we pick the candidate with the largest area on the very
-      // first click. Once the user has placed two or more points, the
-      // decoder is far more confident in a specific scale, so we trust
-      // the IoU score.
+      // SAM2 returns three candidates that span (part / sub-object / whole).
+      // The IoU scores are noisy at low N, and the user's expectation is
+      // "click selects the whole thing" + "adding a positive click grows
+      // the selection, adding a negative click shrinks it." A largest-
+      // area pick honors both: every additional positive point can only
+      // make the new largest mask the same size or larger; negative
+      // points constrain the decoder so all three candidates shrink.
       let bestIdx = 0;
-      if (N <= 1) {
-        let bestArea = -1;
-        for (let m = 0; m < numMasks; m++) {
-          let area = 0;
-          const start = m * maskSize;
-          for (let i = 0; i < maskSize; i++) {
-            if (maskData[start + i] > 0) area++;
-          }
-          if (area > bestArea) { bestArea = area; bestIdx = m; }
+      let bestArea = -1;
+      for (let m = 0; m < numMasks; m++) {
+        let area = 0;
+        const start = m * maskSize;
+        for (let i = 0; i < maskSize; i++) {
+          if (maskData[start + i] > 0) area++;
         }
-      } else if (iouScores) {
-        let bestScore = -Infinity;
-        for (let i = 0; i < numMasks; i++) {
-          if (iouScores[i] > bestScore) { bestScore = iouScores[i]; bestIdx = i; }
-        }
+        if (area > bestArea) { bestArea = area; bestIdx = m; }
       }
 
-      // Send back soft probabilities (sigmoid of the logits) instead of
-      // a hard 0/1 mask. The renderer uses these for feathering — the
-      // bilinear-upsampled probability map gives smooth alpha gradients
-      // at the mask edge, which the previous binary mask could not.
-      const bestMask = new Float32Array(maskSize);
+      // Build the soft probability map (sigmoid of logits).
+      const probs = new Float32Array(maskSize);
       const offset = bestIdx * maskSize;
       for (let i = 0; i < maskSize; i++) {
         const x = maskData[offset + i];
-        bestMask[i] = x >= 0
+        probs[i] = x >= 0
           ? 1 / (1 + Math.exp(-x))
           : Math.exp(x) / (1 + Math.exp(x));
       }
 
+      // Smooth the 256x256 probability map with a separable 5-tap
+      // Gaussian. On a 1500+ display canvas one source pixel covers
+      // ~6 display pixels, and SAM2's logits are extremely confident
+      // (basically binary at the boundary), so without smoothing the
+      // upsample is heavily stair-stepped. The blur trades a small
+      // amount of edge precision for a clean continuous boundary.
+      const blurred = gaussianBlur5(probs, maskW, maskH);
+
       self.postMessage({
         type: "mask-result",
         data: {
-          mask: Array.from(bestMask),
+          mask: Array.from(blurred),
           width: maskW,
           height: maskH,
           score: iouScores ? iouScores[bestIdx] : 0,
@@ -242,6 +237,39 @@ async function loadMsgpackFormat(url, imageWidth, imageHeight) {
     tensors,
     originalSize: decoded.original_size || [imageHeight, imageWidth],
   };
+}
+
+// Separable 5-tap Gaussian blur ([1,4,6,4,1] / 16). Edges clamp.
+function gaussianBlur5(src, w, h) {
+  const tmp = new Float32Array(src.length);
+  const out = new Float32Array(src.length);
+  // horizontal pass
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const xm2 = Math.max(0, x - 2);
+      const xm1 = Math.max(0, x - 1);
+      const xp1 = Math.min(w - 1, x + 1);
+      const xp2 = Math.min(w - 1, x + 2);
+      tmp[row + x] =
+        (src[row + xm2] + 4 * src[row + xm1] + 6 * src[row + x] +
+         4 * src[row + xp1] + src[row + xp2]) / 16;
+    }
+  }
+  // vertical pass
+  for (let y = 0; y < h; y++) {
+    const ym2 = Math.max(0, y - 2) * w;
+    const ym1 = Math.max(0, y - 1) * w;
+    const yc  = y * w;
+    const yp1 = Math.min(h - 1, y + 1) * w;
+    const yp2 = Math.min(h - 1, y + 2) * w;
+    for (let x = 0; x < w; x++) {
+      out[yc + x] =
+        (tmp[ym2 + x] + 4 * tmp[ym1 + x] + 6 * tmp[yc + x] +
+         4 * tmp[yp1 + x] + tmp[yp2 + x]) / 16;
+    }
+  }
+  return out;
 }
 
 // IEEE-754 half → single precision.
