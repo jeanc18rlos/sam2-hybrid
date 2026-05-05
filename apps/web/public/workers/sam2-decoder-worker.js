@@ -129,12 +129,10 @@ self.onmessage = async (e) => {
       // Always pick the candidate with the largest area.
       //
       // SAM2 returns three candidates that span (part / sub-object / whole).
-      // The IoU scores are noisy at low N, and the user's expectation is
-      // "click selects the whole thing" + "adding a positive click grows
-      // the selection, adding a negative click shrinks it." A largest-
-      // area pick honors both: every additional positive point can only
-      // make the new largest mask the same size or larger; negative
-      // points constrain the decoder so all three candidates shrink.
+      // IoU scores are noisy at low N. A largest-area pick matches the
+      // user's expectation: a click selects the whole thing, additional
+      // positive clicks only ever grow the mask, negative clicks shrink it
+      // (because all three candidates contract to honor the exclude point).
       let bestIdx = 0;
       let bestArea = -1;
       for (let m = 0; m < numMasks; m++) {
@@ -146,43 +144,48 @@ self.onmessage = async (e) => {
         if (area > bestArea) { bestArea = area; bestIdx = m; }
       }
 
-      // Build the soft probability map (sigmoid of logits).
-      const probs = new Float32Array(maskSize);
+      // Quality pipeline. The exporter clamps logits to [-32, 32]; after
+      // sigmoid that's essentially a binary 0/1 mask with a 1-2 pixel
+      // boundary band. To get a clean upsampled boundary we have to do
+      // the heavy lifting in LOGIT space before sigmoid kills the gradient.
+      //
+      //   1. Extract the chosen candidate's raw 256x256 logits.
+      //   2. Bilinear upsample LOGITS to 1024x1024. The boundary band
+      //      grows from ~1-2 source pixels to ~4-8 hi-res pixels and
+      //      stays a smooth signed-value gradient.
+      //   3. Sigmoid the hi-res logits. The wide boundary band yields
+      //      a wide soft-alpha ramp.
+      //   4. Light 5-tap Gaussian on the hi-res probability map to
+      //      polish any remaining sub-pixel jitter.
+      const HI = 1024;
+      const logitsBest = new Float32Array(maskSize);
       const offset = bestIdx * maskSize;
       for (let i = 0; i < maskSize; i++) {
-        const x = maskData[offset + i];
-        probs[i] = x >= 0
+        logitsBest[i] = maskData[offset + i];
+      }
+      const logitsHi = upsampleBilinear(logitsBest, maskW, maskH, HI, HI);
+
+      const probsHi = new Float32Array(HI * HI);
+      for (let i = 0; i < probsHi.length; i++) {
+        const x = logitsHi[i];
+        probsHi[i] = x >= 0
           ? 1 / (1 + Math.exp(-x))
           : Math.exp(x) / (1 + Math.exp(x));
       }
+      const finalProbs = gaussianBlur5(probsHi, HI, HI);
 
-      // Smooth the 256x256 probability map with a separable 5-tap
-      // Gaussian. SAM2's logits are extremely confident (essentially
-      // binary at the boundary), so without smoothing the upsample is
-      // stair-stepped. Tiny edge-precision loss for a clean boundary.
-      const blurred = gaussianBlur5(probs, maskW, maskH);
-
-      // Upsample the 256x256 map to 1024x1024 with bilinear filtering
-      // INSIDE the worker. This is the "we always work on a 1024 grid"
-      // promise — the renderer thresholds, dilates the border, and
-      // builds the wash on the high-res grid, so a final drawImage to
-      // a ~1500-display canvas is only ~1.5x and smooths beautifully.
-      // The decoder's 256x256 export stays unchanged on disk.
-      const HI = 1024;
-      const upsampled = upsampleBilinear(blurred, maskW, maskH, HI, HI);
-
-      // Transfer the buffer (zero-copy) — 4 MB is too big to clone.
+      // Transfer the buffer zero-copy — 4 MB is too big to structured-clone.
       self.postMessage(
         {
           type: "mask-result",
           data: {
-            mask: upsampled.buffer,
+            mask: finalProbs.buffer,
             width: HI,
             height: HI,
             score: iouScores ? iouScores[bestIdx] : 0,
           },
         },
-        [upsampled.buffer]
+        [finalProbs.buffer]
       );
     } catch (err) {
       self.postMessage({ type: "error", data: "Decode failed: " + err.message });
