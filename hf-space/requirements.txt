@@ -1,4 +1,6 @@
 gradio==4.44.0
-onnxruntime-gpu==1.20.0
+# Free Space tier is CPU-only. If you upgrade to a GPU Space, swap to
+# onnxruntime-gpu==1.24.2 (must match samexporter's pinned version).
+onnxruntime==1.24.2
 Pillow==10.4.0
 numpy==1.26.4
